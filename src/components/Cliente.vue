@@ -41,6 +41,16 @@ interface YoutubeItem {
     snippet: { title: string; thumbnails: { default: { url: string } } };
 }
 
+// Estructura de los elementos guardados en Firebase
+interface ColaItem {
+    nombre: string;
+    videoId: string;
+    deviceId: string;
+    mesa: string;
+    estado: string;
+    timestamp: number;
+}
+
 const props = defineProps<{ mesa: string }>();
 const query = ref<string>("");
 const resultados = ref<YoutubeItem[]>([]);
@@ -62,7 +72,8 @@ async function cargarCancionExistente() {
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
         if (snapshot.exists()) {
-            const datos = Object.values(snapshot.val()).find((c: any) => c.deviceId === deviceId);
+            const raw = snapshot.val() as Record<string, ColaItem>;
+            const datos = Object.values(raw).find((c) => c.deviceId === deviceId);
             if (datos) {
                 yaAgrego.value = true;
                 miCancion.value = {
@@ -138,9 +149,10 @@ async function cambiarCancion() {
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
         if (snapshot.exists()) {
-            const canciones = snapshot.val();
+            const canciones = snapshot.val() as Record<string, ColaItem>;
             for (const key in canciones) {
-                if (canciones[key].deviceId === deviceId) {
+                const item = canciones[key];
+                if (item && item.deviceId === deviceId) {
                     await remove(dbRef(db, `mesas/${props.mesa}/cola/${key}`));
                 }
             }
