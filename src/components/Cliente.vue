@@ -73,13 +73,17 @@ async function cargarCancionExistente() {
         const snapshot = await get(colaRef);
         if (snapshot.exists()) {
             const raw = snapshot.val() as Record<string, ColaItem>;
-            const datos = Object.values(raw).find((c) => c.deviceId === deviceId);
-            if (datos) {
-                yaAgrego.value = true;
-                miCancion.value = {
-                    id: { videoId: datos.videoId },
-                    snippet: { title: datos.nombre, thumbnails: { default: { url: "" } } },
-                };
+            const mias = Object.values(raw).filter((c) => c.deviceId === deviceId);
+            // Deshabilitar agregar si ya hay 2 o más
+            yaAgrego.value = mias.length >= 2;
+            if (mias.length > 0) {
+                const ultima = mias[mias.length - 1];
+                if (ultima) {
+                    miCancion.value = {
+                        id: { videoId: ultima.videoId },
+                        snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
+                    };
+                }
             }
         }
     } catch (e) {
@@ -128,17 +132,18 @@ async function agregar(item: YoutubeItem) {
     if (yaAgrego.value) return;
 
     try {
-        // Asegurar una sola canción por dispositivo: eliminar previas
+        // Limitar a máximo 2 por dispositivo
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
+        let count = 0;
         if (snapshot.exists()) {
             const canciones = snapshot.val() as Record<string, ColaItem>;
-            for (const key in canciones) {
-                const prev = canciones[key];
-                if (prev && prev.deviceId === deviceId) {
-                    await remove(dbRef(db, `mesas/${props.mesa}/cola/${key}`));
-                }
-            }
+            count = Object.values(canciones).reduce((acc, c) => acc + (c && c.deviceId === deviceId ? 1 : 0), 0);
+        }
+        if (count >= 2) {
+            error.value = "Ya tienes 2 canciones en la cola";
+            yaAgrego.value = true;
+            return;
         }
 
         await push(colaRef, {
@@ -149,7 +154,8 @@ async function agregar(item: YoutubeItem) {
             estado: "pendiente",
             timestamp: Date.now(),
         });
-        yaAgrego.value = true;
+        // Recalcular si ya llegó al tope
+        yaAgrego.value = count + 1 >= 2;
         miCancion.value = item;
     } catch (e) {
         console.error(e);
