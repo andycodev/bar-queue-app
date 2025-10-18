@@ -6,7 +6,7 @@ import Laptop from '../components/Laptop.vue'
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/cliente/MESA1'
+    redirect: '/laptop'
   },
   {
     path: '/cliente/:mesa?',
