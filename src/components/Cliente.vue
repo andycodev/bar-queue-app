@@ -128,7 +128,20 @@ async function agregar(item: YoutubeItem) {
     if (yaAgrego.value) return;
 
     try {
-        await push(dbRef(db, `mesas/${props.mesa}/cola`), {
+        // Asegurar una sola canción por dispositivo: eliminar previas
+        const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
+        const snapshot = await get(colaRef);
+        if (snapshot.exists()) {
+            const canciones = snapshot.val() as Record<string, ColaItem>;
+            for (const key in canciones) {
+                const prev = canciones[key];
+                if (prev && prev.deviceId === deviceId) {
+                    await remove(dbRef(db, `mesas/${props.mesa}/cola/${key}`));
+                }
+            }
+        }
+
+        await push(colaRef, {
             nombre: item.snippet.title,
             videoId: item.id.videoId,
             deviceId: deviceId,
