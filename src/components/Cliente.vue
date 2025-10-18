@@ -15,6 +15,15 @@
             <button @click="cambiarCancion" class="bg-red-500 text-white p-1 rounded">Cambiar</button>
         </div>
 
+        <p v-if="yaAgrego" class="text-sm text-blue-700 bg-blue-50 border border-blue-200 p-2 rounded">
+            Tienes una canción por escuchar. Si deseas cambiarla, primero elimínala con el botón
+            <strong>"Cambiar"</strong> y luego podrás agregar una nueva y esperar tu turno.
+        </p>
+
+        <div v-if="mensaje" class="text-sm text-green-700 bg-green-50 border border-green-200 p-2 rounded mt-2">
+            {{ mensaje }}
+        </div>
+
         <div v-for="item in resultados" :key="item.id.videoId"
             class="p-2 border rounded my-2 flex justify-between items-center">
             <div class="flex items-center">
@@ -28,13 +37,23 @@
         </div>
 
         <p v-if="error" class="text-red-500 mt-2">{{ error }}</p>
+
+        <div class="mt-6">
+            <h3 class="text-lg font-semibold mb-2">Próximas canciones (Mesa {{ mesa }}):</h3>
+            <ul v-if="cola.length > 0" class="space-y-2">
+                <li v-for="(c, index) in cola" :key="c.key" class="border p-2 rounded flex justify-between items-center">
+                    <span>{{ index + 1 }}. {{ c.nombre }} (Mesa: {{ c.mesa }})</span>
+                </li>
+            </ul>
+            <p v-else class="text-sm text-gray-600">No hay canciones en la cola.</p>
+        </div>
     </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { db } from "../firebase";
-import { push, ref as dbRef, get, remove } from "firebase/database";
+import { push, ref as dbRef, get, remove, onChildAdded, onChildRemoved } from "firebase/database";
 
 interface YoutubeItem {
     id: { videoId: string };
@@ -50,6 +69,7 @@ interface ColaItem {
     estado: string;
     timestamp: number;
 }
+interface ColaItemWithKey extends ColaItem { key: string }
 
 const props = defineProps<{ mesa: string }>();
 const query = ref<string>("");
@@ -57,6 +77,8 @@ const resultados = ref<YoutubeItem[]>([]);
 const yaAgrego = ref(false);
 const miCancion = ref<YoutubeItem | null>(null);
 const error = ref<string>("");
+const mensaje = ref<string>("");
+const cola = ref<ColaItemWithKey[]>([]);
 
 let deviceId = "";
 
@@ -65,6 +87,51 @@ onMounted(async () => {
     localStorage.setItem("deviceId", deviceId);
 
     await cargarCancionExistente();
+
+    // Cargar y escuchar la cola de esta mesa
+    try {
+        const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
+        const snapshot = await get(colaRef);
+        if (snapshot.exists()) {
+            const raw = snapshot.val() as Record<string, ColaItem>;
+            cola.value = Object.entries(raw)
+                .map(([key, val]) => ({ key, ...val }))
+                .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+        }
+        onChildAdded(colaRef, (snap) => {
+            const data = snap.val() as ColaItem;
+            const nuevo: ColaItemWithKey = { key: snap.key!, ...data };
+            if (!cola.value.find(c => c.key === nuevo.key)) cola.value.push(nuevo);
+            cola.value.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+            // Recalcular estado del dispositivo en tiempo real
+            const mias = cola.value.filter(c => c.deviceId === deviceId);
+            yaAgrego.value = mias.length >= 1;
+            if (mias.length > 0) {
+                const ultima = mias[mias.length - 1]!;
+                miCancion.value = {
+                    id: { videoId: ultima.videoId },
+                    snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
+                };
+            }
+        });
+        onChildRemoved(colaRef, (snap) => {
+            cola.value = cola.value.filter(c => c.key !== snap.key);
+            // Recalcular estado del dispositivo en tiempo real (p.ej. cuando empieza a reproducirse se remueve de cola)
+            const mias = cola.value.filter(c => c.deviceId === deviceId);
+            yaAgrego.value = mias.length >= 1;
+            if (mias.length > 0) {
+                const ultima = mias[mias.length - 1]!;
+                miCancion.value = {
+                    id: { videoId: ultima.videoId },
+                    snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
+                };
+            } else {
+                miCancion.value = null;
+            }
+        });
+    } catch (e) {
+        console.error(e);
+    }
 });
 
 async function cargarCancionExistente() {
@@ -74,8 +141,8 @@ async function cargarCancionExistente() {
         if (snapshot.exists()) {
             const raw = snapshot.val() as Record<string, ColaItem>;
             const mias = Object.values(raw).filter((c) => c.deviceId === deviceId);
-            // Deshabilitar agregar si ya hay 2 o más
-            yaAgrego.value = mias.length >= 2;
+            // Deshabilitar agregar si ya hay 1 o más (solo una canción por dispositivo)
+            yaAgrego.value = mias.length >= 1;
             if (mias.length > 0) {
                 const ultima = mias[mias.length - 1];
                 if (ultima) {
@@ -132,7 +199,7 @@ async function agregar(item: YoutubeItem) {
     if (yaAgrego.value) return;
 
     try {
-        // Limitar a máximo 2 por dispositivo
+        // Limitar a máximo 1 por dispositivo
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
         let count = 0;
@@ -140,8 +207,8 @@ async function agregar(item: YoutubeItem) {
             const canciones = snapshot.val() as Record<string, ColaItem>;
             count = Object.values(canciones).reduce((acc, c) => acc + (c && c.deviceId === deviceId ? 1 : 0), 0);
         }
-        if (count >= 2) {
-            error.value = "Ya tienes 2 canciones en la cola";
+        if (count >= 1) {
+            error.value = "Tu canción ya está en la cola. Si deseas cambiarla, presiona 'Cambiar' para eliminarla y luego agrega otra.";
             yaAgrego.value = true;
             return;
         }
@@ -154,8 +221,8 @@ async function agregar(item: YoutubeItem) {
             estado: "pendiente",
             timestamp: Date.now(),
         });
-        // Recalcular si ya llegó al tope
-        yaAgrego.value = count + 1 >= 2;
+        // Recalcular si ya llegó al tope (1 por dispositivo)
+        yaAgrego.value = count + 1 >= 1;
         miCancion.value = item;
     } catch (e) {
         console.error(e);
@@ -165,6 +232,10 @@ async function agregar(item: YoutubeItem) {
 
 async function cambiarCancion() {
     try {
+        // Confirmación previa
+        const ok = window.confirm("¿Eliminar tu canción actual de la cola?");
+        if (!ok) return;
+
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
         if (snapshot.exists()) {
@@ -179,9 +250,12 @@ async function cambiarCancion() {
         yaAgrego.value = false;
         miCancion.value = null;
         resultados.value = [];
+        error.value = "";
+        mensaje.value = "Tu canción fue eliminada. Ya puedes agregar una nueva.";
     } catch (e) {
         console.error(e);
         error.value = "No se pudo cambiar la canción";
+        mensaje.value = "";
     }
 }
 </script>
