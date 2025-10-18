@@ -55,7 +55,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from "vue";
 import { db } from "../firebase";
-import { push, ref as dbRef, get, remove, onChildAdded, onChildRemoved } from "firebase/database";
+import { push, ref as dbRef, get, remove, onChildAdded, onChildRemoved, onValue } from "firebase/database";
 
 interface YoutubeItem {
     id: { videoId: string };
@@ -82,6 +82,8 @@ const error = ref<string>("");
 const mensaje = ref<string>("");
 const cola = ref<ColaItemWithKey[]>([]);
 const miMesaEnCola = ref<string | null>(null);
+const reproduciendoAhora = ref(false);
+const miMesaReproduciendo = ref<string | null>(null);
 
 let deviceId = "";
 
@@ -91,6 +93,28 @@ onMounted(async () => {
 
     await recalcularEstadoGlobal();
     await cargarCancionExistente();
+
+    // Escuchar si mi canción está reproduciéndose actualmente en el panel (cooldown hasta que termine)
+    try {
+        onValue(dbRef(db, 'panel/actual'), (snap) => {
+            const act = snap.val() as (ColaItem & { startedAt?: number }) | null;
+            if (act && act.deviceId === deviceId) {
+                reproduciendoAhora.value = true;
+                miMesaReproduciendo.value = act.mesa || null;
+            } else {
+                reproduciendoAhora.value = false;
+                miMesaReproduciendo.value = null;
+                // Limpiar mensajes para volver a estado normal
+                error.value = "";
+                // No forzar mensaje positivo aquí para no molestar; solo limpiar si había bloqueo
+                if (mensaje.value && mensaje.value.includes('Agregado.')) {
+                    // mantener mensaje de agregado si fue reciente; si prefieres, comenta esta línea
+                } else {
+                    mensaje.value = "";
+                }
+            }
+        });
+    } catch {}
 
     // Cargar y escuchar la cola de esta mesa
     try {
@@ -223,7 +247,27 @@ async function buscar() {
     }
 }
 
+// Contar canciones en la mesa actual
+async function contarCancionesMesa(mesaId: string): Promise<number> {
+    try {
+        const colaRef = dbRef(db, `mesas/${mesaId}/cola`);
+        const snap = await get(colaRef);
+        if (!snap.exists()) return 0;
+        const val = snap.val() as Record<string, ColaItem>;
+        return Object.keys(val).length;
+    } catch {
+        return 0;
+    }
+}
+
 async function agregar(item: YoutubeItem) {
+    // Si mi canción está sonando, no permitir agregar hasta que termine
+    if (reproduciendoAhora.value) {
+        error.value = miMesaReproduciendo.value
+            ? `Tu canción se está reproduciendo en la mesa ${miMesaReproduciendo.value}. Por favor espera a que termine para agregar otra.`
+            : `Tu canción se está reproduciendo. Por favor espera a que termine para agregar otra.`;
+        return;
+    }
     // Seguridad extra: verificar GLOBALMENTE antes de agregar
     await recalcularEstadoGlobal();
     if (yaAgrego.value) {
@@ -234,6 +278,7 @@ async function agregar(item: YoutubeItem) {
     }
 
     try {
+        const totalAntes = await contarCancionesMesa(props.mesa);
         // Limitar a máximo 1 por dispositivo (revisión local por mesa + bloqueo global anterior)
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
@@ -259,7 +304,12 @@ async function agregar(item: YoutubeItem) {
         // Recalcular estado GLOBAL después de agregar
         await recalcularEstadoGlobal();
         miCancion.value = item;
-        mensaje.value = "Agregado. Si no escuchas inmediatamente, espera unos segundos mientras preparamos el reproductor.";
+        // Mostrar solo si es la PRIMERA canción de la mesa
+        if (totalAntes === 0) {
+            mensaje.value = "Agregado. Si no escuchas inmediatamente, espera unos segundos mientras preparamos el reproductor.";
+        } else {
+            mensaje.value = "";
+        }
         error.value = "";
     } catch (e) {
         console.error(e);

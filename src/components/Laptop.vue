@@ -297,7 +297,7 @@ function deduplicarPorDispositivo() {
         if (arr.length > 1) {
             for (let i = 1; i < arr.length; i++) {
                 const drop = arr[i]!;
-                remove(dbRef(db, `mesas/${drop.mesa}/cola/${drop.key}`));
+                // Solo ajustar la lista local sin tocar el backend
                 cola.value = cola.value.filter(c => c.key !== drop.key);
             }
         }
@@ -343,12 +343,13 @@ onMounted(async () => {
         onChildAdded(colaRef, (snapshot) => {
             const data = snapshot.val();
             const nuevo: Cancion = { key: snapshot.key!, ...data };
-            const existente = cola.value.find(c => c.deviceId === nuevo.deviceId);
+            // Deduplicar solo a nivel local (no borrar en backend)
+            const existente = cola.value.find(c => c.deviceId === nuevo.deviceId && c.mesa === nuevo.mesa);
             if (existente) {
                 const keep = (existente.timestamp ?? 0) <= (nuevo.timestamp ?? 0) ? existente : nuevo;
                 const drop = keep === existente ? nuevo : existente;
                 if (!cola.value.find(c => c.key === keep.key)) cola.value.push(keep);
-                remove(dbRef(db, `mesas/${drop.mesa}/cola/${drop.key}`));
+                // Remover duplicado solo en la lista local
                 cola.value = cola.value.filter(c => c.key !== drop.key);
             } else {
                 if (!cola.value.find(c => c.key === nuevo.key)) cola.value.push(nuevo);
