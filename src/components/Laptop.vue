@@ -43,7 +43,7 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, watch } from "vue";
 import { db } from "../firebase";
-import { ref as dbRef, get, onChildAdded, onChildRemoved, remove } from "firebase/database";
+import { ref as dbRef, get, onChildAdded, onChildRemoved, remove, set } from "firebase/database";
 
 interface Cancion {
     key: string;
@@ -63,12 +63,25 @@ const playerReady = ref(false);
 const volumen = ref(100);
 const sonidoDesbloqueado = ref(false);
 const mesasSuscritas = ref<Set<string>>(new Set());
+const panelActualRef = dbRef(db, 'panel/actual');
 
 function cargarPreferenciasAudio() {
     try {
-        const vol = Number(localStorage.getItem('audioVolume'));
-        if (!Number.isNaN(vol)) volumen.value = Math.min(100, Math.max(0, vol));
-        sonidoDesbloqueado.value = localStorage.getItem('audioUnlocked') === 'true';
+        const rawVol = localStorage.getItem('audioVolume');
+        const rawUnlocked = localStorage.getItem('audioUnlocked');
+        if (rawVol == null) {
+            volumen.value = 80; // default
+            localStorage.setItem('audioVolume', String(volumen.value));
+        } else {
+            const vol = Number(rawVol);
+            if (!Number.isNaN(vol)) volumen.value = Math.min(100, Math.max(0, vol));
+        }
+        if (rawUnlocked == null) {
+            sonidoDesbloqueado.value = true; // default to unlocked once on first run
+            localStorage.setItem('audioUnlocked', 'true');
+        } else {
+            sonidoDesbloqueado.value = rawUnlocked === 'true';
+        }
     } catch {}
 }
 
@@ -114,11 +127,15 @@ function cargarYouTubeAPI() {
 async function reproducirSiguiente() {
     if (!cola.value.length) {
         actual.value = null;
+        // Limpiar estado del panel si no hay más canciones
+        try { await set(panelActualRef, null); } catch {}
         return;
     }
 
     const siguiente = cola.value.shift()!;
     actual.value = siguiente;
+    // Guardar estado actual en backend con timestamp de inicio
+    try { await set(panelActualRef, { ...siguiente, startedAt: Date.now() }); } catch {}
 
     // Esperar a que el DOM pinte el contenedor #player
     await nextTick();
@@ -157,6 +174,7 @@ async function reproducirSiguiente() {
 function onPlayerStateChange(event: any) {
     const YT = (window as any).YT;
     if (event.data === YT.PlayerState.ENDED) {
+        try { set(panelActualRef, null); } catch {}
         reproducirSiguiente();
     }
     // Si el autoplay fue bloqueado, mostrar botón para reproducir con gesto del usuario
@@ -238,6 +256,7 @@ function onPlayerError(event: any) {
         mostrarBotonPlay.value = false;
         // Dar un pequeño margen para que el DOM y la cola se estabilicen
         setTimeout(() => {
+            try { set(panelActualRef, null); } catch {}
             reproducirSiguiente();
         }, 0);
         return;
@@ -258,6 +277,7 @@ function eliminar(key: string) {
 function eliminarActual() {
     if (actual.value) {
         remove(dbRef(db, `mesas/${actual.value.mesa}/cola/${actual.value.key}`));
+        try { set(panelActualRef, null); } catch {}
         actual.value = null;
         reproducirSiguiente();
     }
@@ -370,6 +390,33 @@ onMounted(async () => {
 
     // Deduplicar existentes y luego iniciar si corresponde
     deduplicarPorDispositivo();
+    // Intentar reanudar desde panel/actual
+    try {
+        const snap = await get(panelActualRef);
+        if (snap.exists()) {
+            const act = snap.val();
+            if (act && act.videoId) {
+                actual.value = act;
+                await nextTick();
+                playerReady.value = false;
+                const elapsed = Math.max(0, Math.floor((Date.now() - (act.startedAt ?? Date.now())) / 1000));
+                player = new (window as any).YT.Player("player", {
+                    height: "315",
+                    width: "560",
+                    videoId: act.videoId,
+                    playerVars: {
+                        autoplay: 1,
+                        playsinline: 1,
+                        mute: sonidoDesbloqueado.value ? 0 : 1,
+                        start: elapsed,
+                        origin: window.location.origin
+                    },
+                    events: { onReady: onPlayerReady, onStateChange: onPlayerStateChange, onError: onPlayerError }
+                });
+            }
+        }
+    } catch {}
+    // Si no había estado previo, arrancar normalmente
     if (!actual.value && cola.value.length) reproducirSiguiente();
 });
 

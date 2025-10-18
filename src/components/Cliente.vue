@@ -16,7 +16,9 @@
         </div>
 
         <p v-if="yaAgrego" class="text-sm text-blue-700 bg-blue-50 border border-blue-200 p-2 rounded">
-            Tienes una canción por escuchar. Si deseas cambiarla, primero elimínala con el botón
+            Tienes una canción en la cola
+            <span v-if="miMesaEnCola && miMesaEnCola !== mesa">en la mesa {{ miMesaEnCola }}</span>.
+            Si deseas cambiarla, primero elimínala con el botón
             <strong>"Cambiar"</strong> y luego podrás agregar una nueva y esperar tu turno.
         </p>
 
@@ -51,7 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { db } from "../firebase";
 import { push, ref as dbRef, get, remove, onChildAdded, onChildRemoved } from "firebase/database";
 
@@ -79,6 +81,7 @@ const miCancion = ref<YoutubeItem | null>(null);
 const error = ref<string>("");
 const mensaje = ref<string>("");
 const cola = ref<ColaItemWithKey[]>([]);
+const miMesaEnCola = ref<string | null>(null);
 
 let deviceId = "";
 
@@ -86,6 +89,7 @@ onMounted(async () => {
     deviceId = localStorage.getItem("deviceId") || Math.random().toString(36).substring(2, 9);
     localStorage.setItem("deviceId", deviceId);
 
+    await recalcularEstadoGlobal();
     await cargarCancionExistente();
 
     // Cargar y escuchar la cola de esta mesa
@@ -98,40 +102,63 @@ onMounted(async () => {
                 .map(([key, val]) => ({ key, ...val }))
                 .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
         }
-        onChildAdded(colaRef, (snap) => {
+        onChildAdded(colaRef, async (snap) => {
             const data = snap.val() as ColaItem;
             const nuevo: ColaItemWithKey = { key: snap.key!, ...data };
             if (!cola.value.find(c => c.key === nuevo.key)) cola.value.push(nuevo);
             cola.value.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-            // Recalcular estado del dispositivo en tiempo real
-            const mias = cola.value.filter(c => c.deviceId === deviceId);
-            yaAgrego.value = mias.length >= 1;
-            if (mias.length > 0) {
-                const ultima = mias[mias.length - 1]!;
-                miCancion.value = {
-                    id: { videoId: ultima.videoId },
-                    snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
-                };
-            }
+            await recalcularEstadoGlobal();
         });
-        onChildRemoved(colaRef, (snap) => {
+        onChildRemoved(colaRef, async (snap) => {
             cola.value = cola.value.filter(c => c.key !== snap.key);
-            // Recalcular estado del dispositivo en tiempo real (p.ej. cuando empieza a reproducirse se remueve de cola)
-            const mias = cola.value.filter(c => c.deviceId === deviceId);
-            yaAgrego.value = mias.length >= 1;
-            if (mias.length > 0) {
-                const ultima = mias[mias.length - 1]!;
-                miCancion.value = {
-                    id: { videoId: ultima.videoId },
-                    snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
-                };
-            } else {
-                miCancion.value = null;
-            }
+            await recalcularEstadoGlobal();
         });
     } catch (e) {
         console.error(e);
     }
+});
+
+// Recalcular estado global: 1 por dispositivo en TODO el bar
+async function recalcularEstadoGlobal() {
+    try {
+        const mesasSnap = await get(dbRef(db, 'mesas'));
+        let count = 0;
+        let ultima: ColaItem | null = null;
+        let mesaIdDeUltima: string | null = null;
+        if (mesasSnap.exists()) {
+            const mesasVal = mesasSnap.val() as Record<string, { cola?: Record<string, ColaItem> }>;
+            for (const [mesaId, mesaVal] of Object.entries(mesasVal)) {
+                const colaMesa = mesaVal?.cola || {};
+                for (const item of Object.values(colaMesa)) {
+                    if (item && item.deviceId === deviceId) {
+                        count++;
+                        if (!ultima || (item.timestamp ?? 0) >= (ultima.timestamp ?? 0)) {
+                            ultima = { ...item } as ColaItem;
+                            mesaIdDeUltima = mesaId;
+                        }
+                    }
+                }
+            }
+        }
+        yaAgrego.value = count >= 1;
+        miMesaEnCola.value = mesaIdDeUltima;
+        if (ultima) {
+            miCancion.value = {
+                id: { videoId: ultima.videoId },
+                snippet: { title: ultima.nombre, thumbnails: { default: { url: "" } } },
+            };
+        } else {
+            miCancion.value = null;
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+// Cuando el usuario cambia de mesa por URL, recargar lista y estado global
+watch(() => props.mesa, async () => {
+    await cargarCancionExistente();
+    await recalcularEstadoGlobal();
 });
 
 async function cargarCancionExistente() {
@@ -142,6 +169,7 @@ async function cargarCancionExistente() {
             const raw = snapshot.val() as Record<string, ColaItem>;
             const mias = Object.values(raw).filter((c) => c.deviceId === deviceId);
             // Deshabilitar agregar si ya hay 1 o más (solo una canción por dispositivo)
+            // Nota: este valor local se reemplaza por el estado GLOBAL en recalcularEstadoGlobal()
             yaAgrego.value = mias.length >= 1;
             if (mias.length > 0) {
                 const ultima = mias[mias.length - 1];
@@ -196,10 +224,17 @@ async function buscar() {
 }
 
 async function agregar(item: YoutubeItem) {
-    if (yaAgrego.value) return;
+    // Seguridad extra: verificar GLOBALMENTE antes de agregar
+    await recalcularEstadoGlobal();
+    if (yaAgrego.value) {
+        error.value = miMesaEnCola.value && miMesaEnCola.value !== props.mesa
+            ? `Ya tienes una canción en la cola en la mesa ${miMesaEnCola.value}. Espera tu turno o cambiala.`
+            : `Ya tienes una canción en la cola. Espera tu turno o cámbiala.`;
+        return;
+    }
 
     try {
-        // Limitar a máximo 1 por dispositivo
+        // Limitar a máximo 1 por dispositivo (revisión local por mesa + bloqueo global anterior)
         const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
         const snapshot = await get(colaRef);
         let count = 0;
@@ -221,33 +256,36 @@ async function agregar(item: YoutubeItem) {
             estado: "pendiente",
             timestamp: Date.now(),
         });
-        // Recalcular si ya llegó al tope (1 por dispositivo)
-        yaAgrego.value = count + 1 >= 1;
+        // Recalcular estado GLOBAL después de agregar
+        await recalcularEstadoGlobal();
         miCancion.value = item;
+        mensaje.value = "Agregado. Si no escuchas inmediatamente, espera unos segundos mientras preparamos el reproductor.";
+        error.value = "";
     } catch (e) {
         console.error(e);
         error.value = "No se pudo agregar la canción";
     }
 }
 
+// Eliminar tu canción en cualquier mesa del bar
 async function cambiarCancion() {
     try {
-        // Confirmación previa
         const ok = window.confirm("¿Eliminar tu canción actual de la cola?");
         if (!ok) return;
 
-        const colaRef = dbRef(db, `mesas/${props.mesa}/cola`);
-        const snapshot = await get(colaRef);
-        if (snapshot.exists()) {
-            const canciones = snapshot.val() as Record<string, ColaItem>;
-            for (const key in canciones) {
-                const item = canciones[key];
-                if (item && item.deviceId === deviceId) {
-                    await remove(dbRef(db, `mesas/${props.mesa}/cola/${key}`));
+        const mesasSnap = await get(dbRef(db, 'mesas'));
+        if (mesasSnap.exists()) {
+            const mesasVal = mesasSnap.val() as Record<string, { cola?: Record<string, ColaItem> }>;
+            for (const [mesaId, mesaVal] of Object.entries(mesasVal)) {
+                const colaMesa = mesaVal?.cola || {};
+                for (const [key, item] of Object.entries(colaMesa)) {
+                    if (item && item.deviceId === deviceId) {
+                        await remove(dbRef(db, `mesas/${mesaId}/cola/${key}`));
+                    }
                 }
             }
         }
-        yaAgrego.value = false;
+        await recalcularEstadoGlobal();
         miCancion.value = null;
         resultados.value = [];
         error.value = "";
